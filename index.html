@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Esfera Quicante - AR (Babylon.js)</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: #101418;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  #renderCanvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+    touch-action: none;
+  }
+
+  /* Banner inferior - NÃO cobre a tela inteira (evita esconder o canvas) */
+  #banner {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    padding: 14px 16px calc(14px + env(safe-area-inset-bottom));
+    background: linear-gradient(to top, rgba(10,12,15,0.92), rgba(10,12,15,0.55) 70%, transparent);
+    color: #eef2f6;
+    font-size: 14px;
+    line-height: 1.4;
+    text-align: center;
+    pointer-events: none;
+    z-index: 10;
+  }
+  #banner b { color: #7cd3ff; }
+
+  #statusMsg {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    padding: 10px 14px;
+    padding-top: calc(10px + env(safe-area-inset-top));
+    background: rgba(10,12,15,0.85);
+    color: #ffd479;
+    font-size: 13px;
+    text-align: center;
+    z-index: 20;
+    pointer-events: none;
+  }
+  #statusMsg:empty { display: none; }
+</style>
+</head>
+<body>
+
+<canvas id="renderCanvas"></canvas>
+
+<div id="statusMsg"></div>
+
+<div id="banner">
+  Toque em uma superfície detectada para posicionar a esfera • <b>arraste</b> para orbitar no modo preview
+</div>
+
+<script src="https://cdn.babylonjs.com/babylon.js"></script>
+<script src="https://cdn.babylonjs.com/loaders/babylonjs.loaders.min.js"></script>
+<script>
+
+// ---------------------------------------------------------------------
+// Handler global de erro: qualquer falha vira texto visível na tela,
+// nunca só um console.log que o usuário nunca vai ver.
+// ---------------------------------------------------------------------
+window.addEventListener("error", (e) => {
+  const s = document.getElementById("statusMsg");
+  if (s) s.textContent = "❌ Erro: " + e.message;
+});
+
+(async () => {
+  try {
+    // =====================================================================
+    // SEÇÃO A: engine, cena, câmera, luzes — e o render loop começa
+    // IMEDIATAMENTE depois, antes de qualquer coisa que possa falhar.
+    // =====================================================================
+    const canvas = document.getElementById("renderCanvas");
+    const engine = new BABYLON.Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true });
+    const scene = new BABYLON.Scene(engine);
+    scene.clearColor = new BABYLON.Color4(0.06, 0.08, 0.1, 1); // cor não-preta p/ debug visual
+
+    // Câmera orbital para o modo preview (fora de AR)
+    const camera = new BABYLON.ArcRotateCamera(
+      "camera",
+      -Math.PI / 2.5,
+      Math.PI / 2.6,
+      3,
+      new BABYLON.Vector3(0, 0.3, 0),
+      scene
+    );
+    camera.attachControl(canvas, true);
+    camera.lowerRadiusLimit = 0.8;
+    camera.upperRadiusLimit = 8;
+    camera.wheelPrecision = 60;
+
+    // Iluminação: hemisférica + direcional
+    const hemiLight = new BABYLON.HemisphericLight("hemiLight", new BABYLON.Vector3(0, 1, 0), scene);
+    hemiLight.intensity = 0.9;
+    const dirLight = new BABYLON.DirectionalLight("dirLight", new BABYLON.Vector3(-0.5, -1, -0.3), scene);
+    dirLight.intensity = 0.8;
+    dirLight.position = new BABYLON.Vector3(2, 4, 2);
+
+    // Ambiente (IBL) — evita materiais PBR pretos e melhora integração com AR
+    scene.createDefaultEnvironment({
+      createSkybox: false,
+      createGround: false,
+    });
+
+    // Chão de referência (visível apenas no modo preview, útil para orientação)
+    const previewGround = BABYLON.MeshBuilder.CreateGround("previewGround", { width: 6, height: 6 }, scene);
+    const groundMat = new BABYLON.StandardMaterial("groundMat", scene);
+    groundMat.diffuseColor = new BABYLON.Color3(0.15, 0.17, 0.19);
+    groundMat.specularColor = BABYLON.Color3.Black();
+    previewGround.material = groundMat;
+    previewGround.position.y = 0;
+    previewGround.receiveShadows = true;
+
+    // =====================================================================
+    // A esfera quicante — geometria, material e lógica de animação
+    // =====================================================================
+    const SPHERE_RADIUS = 0.12; // ~24cm de diâmetro, tamanho de uma bola de tênis grande
+
+    const sphere = BABYLON.MeshBuilder.CreateSphere("bouncingSphere", { diameter: SPHERE_RADIUS * 2, segments: 24 }, scene);
+    const sphereMat = new BABYLON.PBRMaterial("sphereMat", scene);
+    sphereMat.albedoColor = new BABYLON.Color3(1.0, 0.25, 0.15); // laranja-avermelhado vibrante
+    sphereMat.metallic = 0.15;
+    sphereMat.roughness = 0.35;
+    sphere.material = sphereMat;
+
+    // Sombra de contato: um disco escuro semi-transparente sob a esfera,
+    // que fica mais opaco/menor quando a esfera está perto do chão.
+    const shadowDisc = BABYLON.MeshBuilder.CreateDisc("contactShadow", { radius: SPHERE_RADIUS * 1.3, tessellation: 32 }, scene);
+    shadowDisc.rotation.x = Math.PI / 2;
+    const shadowMat = new BABYLON.StandardMaterial("shadowMat", scene);
+    shadowMat.diffuseColor = BABYLON.Color3.Black();
+    shadowMat.emissiveColor = BABYLON.Color3.Black();
+    shadowMat.alpha = 0.35;
+    shadowMat.disableLighting = true;
+    shadowDisc.material = shadowMat;
+    shadowDisc.isPickable = false;
+
+    // Nó "pai" que representa o ponto de ancoragem no mundo real (ou no preview).
+    // A esfera e a sombra ficam relativas a este pivô; ao tocar numa superfície,
+    // só movemos o pivô, e a física de quique roda em coordenadas locais (Y local = altura).
+    const anchorRoot = new BABYLON.TransformNode("anchorRoot", scene);
+    anchorRoot.position = new BABYLON.Vector3(0, 0, 0);
+    sphere.parent = anchorRoot;
+    shadowDisc.parent = anchorRoot;
+
+    // ---- Física simplificada de quique (gravidade + amortecimento) ----
+    const GRAVITY = 4.2;           // "gravidade" ajustada para leitura visual agradável
+    const DAMPING = 0.72;          // fator de perda de energia a cada quique (0-1)
+    const MIN_BOUNCE_VELOCITY = 0.35; // abaixo disso, considera a bola "parada" e reinicia
+    const START_HEIGHT = 0.9;
+
+    let velocityY = 0;
+    let heightY = START_HEIGHT;
+    let isImpacting = false;
+    let impactTimer = 0;
+    const IMPACT_DURATION = 0.12; // duração da deformação squash & stretch, em segundos
+    let restTimer = 0;
+    let isResting = false;
+
+    function resetBounce() {
+      heightY = START_HEIGHT;
+      velocityY = 0;
+      isResting = false;
+      restTimer = 0;
+    }
+    resetBounce();
+
+    // Atualiza a física a cada frame, usando o deltaTime do engine
+    scene.onBeforeRenderObservable.add(() => {
+      const dt = engine.getDeltaTime() / 1000; // segundos
+      if (dt <= 0 || dt > 0.2) return; // ignora saltos grandes (ex: aba em background)
+
+      if (!isResting) {
+        // Integração simples de gravidade
+        velocityY -= GRAVITY * dt;
+        heightY += velocityY * dt;
+
+        // Colisão com o "chão" local (heightY = raio é a superfície onde a esfera repousa)
+        if (heightY <= SPHERE_RADIUS) {
+          heightY = SPHERE_RADIUS;
+
+          if (Math.abs(velocityY) > MIN_BOUNCE_VELOCITY) {
+            velocityY = -velocityY * DAMPING; // quica, perdendo energia
+            isImpacting = true;
+            impactTimer = 0;
+          } else {
+            // Energia baixa demais: a bola "descansa" um instante e reinicia o ciclo
+            velocityY = 0;
+            isResting = true;
+            restTimer = 0;
+          }
+        }
+      } else {
+        restTimer += dt;
+        if (restTimer > 0.6) {
+          resetBounce();
+        }
+      }
+
+      // Posição vertical da esfera relativa ao pivô (anchorRoot)
+      sphere.position.y = heightY;
+
+      // --- Squash & stretch no momento do impacto ---
+      let scaleY = 1;
+      let scaleXZ = 1;
+      if (isImpacting) {
+        impactTimer += dt;
+        const t = Math.min(impactTimer / IMPACT_DURATION, 1);
+        // curva que achata rápido e volta ao normal suavemente (ease-out)
+        const squashAmount = (1 - t) * 0.35;
+        scaleY = 1 - squashAmount;
+        scaleXZ = 1 + squashAmount * 0.6;
+        if (t >= 1) isImpacting = false;
+      }
+      sphere.scaling.set(scaleXZ, scaleY, scaleXZ);
+
+      // --- Sombra de contato: acompanha a esfera no eixo XZ, e sua opacidade/escala
+      // dependem da distância ao chão (mais perto = mais escura e menor) ---
+      shadowDisc.position.x = sphere.position.x;
+      shadowDisc.position.z = sphere.position.z;
+      shadowDisc.position.y = 0.001; // levemente acima do chão para evitar z-fighting
+
+      const heightRatio = BABYLON.Scalar.Clamp(heightY / START_HEIGHT, 0, 1);
+      const shadowScale = BABYLON.Scalar.Lerp(1.1, 0.55, heightRatio);
+      shadowDisc.scaling.set(shadowScale, shadowScale, shadowScale);
+      shadowMat.alpha = BABYLON.Scalar.Lerp(0.4, 0.12, heightRatio);
+    });
+
+    // Inicia o render loop AGORA — antes de qualquer coisa que possa lançar exceção
+    engine.runRenderLoop(() => scene.render());
+    window.addEventListener("resize", () => engine.resize());
+
+    // =====================================================================
+    // SEÇÃO B (não há modelo externo a carregar aqui — a esfera é procedural)
+    // =====================================================================
+
+    // =====================================================================
+    // SEÇÃO C: configuração de WebXR / AR — em try/catch isolado, para que
+    // uma falha aqui nunca derrube o preview 3D que já está funcionando.
+    // =====================================================================
+    const statusMsg = document.getElementById("statusMsg");
+
+    try {
+      const xrHelper = await scene.createDefaultXRExperienceAsync({
+        uiOptions: { sessionMode: "immersive-ar", referenceSpaceType: "local-floor" },
+        optionalFeatures: true,
+      });
+
+      if (!xrHelper.baseExperience) {
+        throw new Error("WebXR AR não suportado neste navegador/dispositivo.");
+      }
+
+      const fm = xrHelper.baseExperience.featuresManager;
+
+      // --- Hit-test: detecta superfícies reais e mostra um reticle ---
+      const hitTest = fm.enableFeature(BABYLON.WebXRFeatureName.HIT_TEST, "latest");
+
+      // Reticle simples (anel) que segue a superfície detectada
+      const reticle = BABYLON.MeshBuilder.CreateTorus("reticle", { diameter: 0.16, thickness: 0.012, tessellation: 32 }, scene);
+      const reticleMat = new BABYLON.StandardMaterial("reticleMat", scene);
+      reticleMat.emissiveColor = new BABYLON.Color3(0.4, 0.85, 1);
+      reticleMat.disableLighting = true;
+      reticle.material = reticleMat;
+      reticle.rotation.x = Math.PI / 2;
+      reticle.isVisible = false;
+
+      let lastHitPose = null;
+
+      hitTest.onHitTestResultObservable.add((results) => {
+        if (results.length) {
+          reticle.isVisible = true;
+          lastHitPose = results[0];
+          lastHitPose.transformationMatrix.decompose(undefined, undefined, reticle.position);
+        } else {
+          reticle.isVisible = false;
+          lastHitPose = null;
+        }
+      });
+
+      // Ao entrar em AR: esconde o chão de preview (não é necessário com câmera real)
+      xrHelper.baseExperience.onStateChangedObservable.add((state) => {
+        if (state === BABYLON.WebXRState.IN_XR) {
+          previewGround.setEnabled(false);
+          statusMsg.textContent = "";
+        } else if (state === BABYLON.WebXRState.NOT_IN_XR) {
+          previewGround.setEnabled(true);
+        }
+      });
+
+      // Toque na tela: reposiciona o pivô da esfera (anchorRoot) no ponto detectado
+      scene.onPointerObservable.add((pointerInfo) => {
+        if (
+          pointerInfo.type === BABYLON.PointerEventTypes.POINTERDOWN &&
+          xrHelper.baseExperience.state === BABYLON.WebXRState.IN_XR &&
+          lastHitPose
+        ) {
+          anchorRoot.position.copyFrom(reticle.position);
+          resetBounce();
+        }
+      });
+
+      // --- Plane detection (opcional, ajuda a estabilizar o hit-test) ---
+      try {
+        fm.enableFeature(BABYLON.WebXRFeatureName.PLANE_DETECTION, "latest");
+      } catch (planeErr) {
+        console.warn("Plane detection indisponível:", planeErr);
+      }
+
+    } catch (xrErr) {
+      console.error(xrErr);
+      statusMsg.textContent = "⚠️ AR indisponível neste navegador (requer HTTPS + Chrome/Android com ARCore). A pré-visualização 3D abaixo funciona normalmente — arraste para orbitar.";
+    }
+
+  } catch (err) {
+    console.error(err);
+    const s = document.getElementById("statusMsg");
+    if (s) s.textContent = "❌ Erro: " + (err.message || err);
+  }
+})();
+
+</script>
+</body>
+</html>
